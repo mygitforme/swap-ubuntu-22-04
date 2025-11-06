@@ -17,6 +17,7 @@ SWAP_SIZE_ARG=""
 ACTION="create" # create|remove|status
 FORCE=0
 LANG="ru"
+SYSTEMD=0
 
 usage(){
   cat <<EOF
@@ -28,6 +29,7 @@ Options:
   --path <path>         Path to swap file (default: /swapfile)
   -f, --force           Force destructive actions (remove without prompt)
   --lang ru|en          Language for messages (ru default)
+  --systemd             Use systemd .swap unit instead of /etc/fstab
 EOF
 }
 
@@ -40,6 +42,7 @@ while [[ $# -gt 0 ]]; do
     --action) ACTION="$2"; shift 2 ;;
     -f|--force) FORCE=1; shift ;;
     --lang) LANG="$2"; shift 2 ;;
+    --systemd) SYSTEMD=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1"; usage; exit 1 ;;
   esac
@@ -82,7 +85,6 @@ detect_existing_swap() {
   else
     # fallback to swapon -s parsing
     while read -r line; do
-      # skip header
       [ -z "$line" ] && continue
       if [[ "$line" == Filename* ]]; then
         continue
@@ -112,15 +114,53 @@ remove_existing_swaps() {
     echo -e "Removing swap: ${path}"
     run_cmd "swapoff ${path}"
     if [ "${DRY_RUN}" -eq 1 ]; then
-      echo -e "${y}[DRY-RUN] sed -i '/${path//\//\\/}/d' /etc/fstab${e}"
+      echo -e "${y}[DRY-RUN] sed -i '/${path//\//\/}/d' /etc/fstab${e}"
     else
-      sed -i.bak "/${path//\//\\/}/d" /etc/fstab || true
+      sed -i.bak "/${path//\//\/}/d" /etc/fstab || true
     fi
     if [ -f "${path}" ] && [ "${DRY_RUN}" -ne 1 ]; then
       rm -f "${path}" || true
     fi
   done
   echo -e "${MSG_REMOVED}"
+}
+
+create_systemd_unit() {
+  unit_name=$(basename "${SWAP_PATH}")
+  unit_file="/etc/systemd/system/${unit_name}.swap"
+  echo -e "${MSG_UNIT_NAME}: ${unit_name}"
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    echo -e "${y}[DRY-RUN] create unit ${unit_file} pointing to ${SWAP_PATH}${e}"
+    return 0
+  fi
+  cat > "${unit_file}" <<EOF
+[Unit]
+Description=Swap file ${SWAP_PATH}
+
+[Swap]
+What=${SWAP_PATH}
+Priority=-2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  run_cmd "systemctl daemon-reload"
+  run_cmd "systemctl enable --now ${unit_name}.swap"
+  echo -e "${MSG_UNIT_CREATED}: ${unit_file}"
+  echo -e "${MSG_UNIT_ENABLED}"
+}
+
+remove_systemd_unit() {
+  unit_name=$(basename "${SWAP_PATH}")
+  unit_file="/etc/systemd/system/${unit_name}.swap"
+  run_cmd "systemctl disable --now ${unit_name}.swap || true"
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    echo -e "${y}[DRY-RUN] rm -f ${unit_file}${e}"
+  else
+    rm -f "${unit_file}" || true
+    run_cmd "systemctl daemon-reload"
+  fi
+  echo -e "${MSG_UNIT_REMOVED}"
 }
 
 perform_create() {
@@ -153,7 +193,6 @@ perform_create() {
     exit 1
   fi
 
-  # check free space (in MB): df -BM gives available in blocks with M suffix; use previous method
   free_space_mb=$(df -BM --output=avail / | sed '1d;s/[^0-9]*//g')
   if [ -n "$free_space_mb" ] && [ $free_space_mb -lt $((swap_size_mb)) ]; then
     echo -e "${r}${l}${MSG_ERROR_NOT_ENOUGH_SPACE}${e}"
@@ -167,11 +206,15 @@ perform_create() {
   fi
   run_cmd "chmod 600 ${SWAP_PATH}"
   run_cmd "mkswap ${SWAP_PATH}"
-  if [ "${DRY_RUN}" -eq 1 ]; then
-    echo -e "${y}[DRY-RUN] echo '${SWAP_PATH} none swap sw 0 0' >> /etc/fstab${e}"
+  if [ "${SYSTEMD}" -eq 1 ]; then
+    create_systemd_unit
   else
-    cp /etc/fstab /etc/fstab.bak || true
-    grep -qF "${SWAP_PATH} none swap sw 0 0" /etc/fstab || echo "${SWAP_PATH} none swap sw 0 0" >> /etc/fstab
+    if [ "${DRY_RUN}" -eq 1 ]; then
+      echo -e "${y}[DRY-RUN] echo '${SWAP_PATH} none swap sw 0 0' >> /etc/fstab${e}"
+    else
+      cp /etc/fstab /etc/fstab.bak || true
+      grep -qF "${SWAP_PATH} none swap sw 0 0" /etc/fstab || echo "${SWAP_PATH} none swap sw 0 0" >> /etc/fstab
+    fi
   fi
   run_cmd "swapon ${SWAP_PATH}"
   if [ "${DRY_RUN}" -eq 1 ]; then
@@ -203,14 +246,18 @@ perform_remove() {
     esac
   fi
 
-  run_cmd "swapoff ${SWAP_PATH}"
-  if [ "${DRY_RUN}" -eq 1 ]; then
-    echo -e "${y}[DRY-RUN] sed -i '/${SWAP_PATH//\//\\/}/d' /etc/fstab${e}"
+  if [ "${SYSTEMD}" -eq 1 ]; then
+    remove_systemd_unit
   else
-    sed -i.bak "/${SWAP_PATH//\//\\/}/d" /etc/fstab || true
-  fi
-  if [ -f "${SWAP_PATH}" ] && [ "${DRY_RUN}" -ne 1 ]; then
-    rm -f "${SWAP_PATH}" || true
+    run_cmd "swapoff ${SWAP_PATH}"
+    if [ "${DRY_RUN}" -eq 1 ]; then
+      echo -e "${y}[DRY-RUN] sed -i '/${SWAP_PATH//\//\\/}/d' /etc/fstab${e}"
+    else
+      sed -i.bak "/${SWAP_PATH//\//\\/}/d" /etc/fstab || true
+    fi
+    if [ -f "${SWAP_PATH}" ] && [ "${DRY_RUN}" -ne 1 ]; then
+      rm -f "${SWAP_PATH}" || true
+    fi
   fi
   echo -e "${MSG_REMOVED}"
 }
@@ -218,6 +265,11 @@ perform_remove() {
 perform_status() {
   echo -e "${MSG_SWAP_DETAILS}:"
   swapon -s
+  if [ "${SYSTEMD}" -eq 1 ]; then
+    unit_name=$(basename "${SWAP_PATH}")
+    echo -e "${MSG_UNIT_NAME}: ${unit_name}.swap"
+    systemctl status ${unit_name}.swap --no-pager || true
+  fi
 }
 
 # main
@@ -228,6 +280,7 @@ case "${ACTION}" in
   status) perform_status ;;
   *) echo "Unknown action: ${ACTION}"; usage; exit 1 ;;
 esac
+
 #!/bin/bash
 b='\033[1m'
 l='\033[4m'
