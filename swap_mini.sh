@@ -16,7 +16,8 @@ SWAP_PATH="/swapfile"
 SWAP_SIZE_ARG=""
 ACTION="create" # create|remove|status
 FORCE=0
-LANG="ru"
+LANG=""
+LANG_SET=0
 SYSTEMD=0
 
 usage(){
@@ -41,20 +42,60 @@ while [[ $# -gt 0 ]]; do
     --path) SWAP_PATH="$2"; shift 2 ;;
     --action) ACTION="$2"; shift 2 ;;
     -f|--force) FORCE=1; shift ;;
-    --lang) LANG="$2"; shift 2 ;;
+  --lang) LANG="$2"; LANG_SET=1; shift 2 ;;
     --systemd) SYSTEMD=1; shift ;;
     -h|--help) usage; exit 0 ;;
-    *) echo "Unknown arg: $1"; usage; exit 1 ;;
+    *) echo "${ERROR_ARG}: $1"; usage; exit 1 ;;
   esac
 done
 
+# If language was not provided explicitly, discover available languages and prompt the user (interactive)
+I18N_DIR="$(dirname "$0")/i18n"
+if [ "${LANG_SET}" -eq 0 ]; then
+  avail=()
+  if [ -d "${I18N_DIR}" ]; then
+    for f in "${I18N_DIR}"/*.sh; do
+      [ -e "$f" ] || continue
+      avail+=("$(basename "$f" .sh)")
+    done
+  fi
+  if [ ${#avail[@]} -eq 0 ]; then
+    LANG="ru"
+  elif [ ${#avail[@]} -eq 1 ]; then
+    LANG="${avail[0]}"
+  else
+    # interactive selection when possible
+    if [ -t 0 ]; then
+      echo "Available languages:"
+      i=1
+      for name in "${avail[@]}"; do
+        echo "  $i) $name"
+        i=$((i+1))
+      done
+      read -p "Choose language [1-${#avail[@]}] (default: 1): " choice
+      if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#avail[@]} ]; then
+        LANG="${avail[$((choice-1))]}"
+      else
+        LANG="${avail[0]}"
+      fi
+    else
+      # non-interactive: try env LANG, else pick first
+      if [ -n "${LANG}" ]; then
+        :
+      else
+        LANG="${avail[0]}"
+      fi
+    fi
+  fi
+fi
+
 # load i18n
-I18N_FILE="$(dirname "$0")/i18n/${LANG}.sh"
+I18N_FILE="${I18N_DIR}/${LANG}.sh"
 if [ -f "${I18N_FILE}" ]; then
   # shellcheck source=/dev/null
   . "${I18N_FILE}"
 else
-  . "$(dirname "$0")/i18n/ru.sh"
+  . "${I18N_DIR}/ru.sh"
 fi
 
 run_cmd() {
