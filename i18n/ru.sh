@@ -1,0 +1,17 @@
+#!/bin/bash
+# Русские строки для swap_mini.sh
+MSG_ROOT_REQUIRED="Этот скрипт должен быть запущен от имени"
+MSG_ENTER_SIZE="Введите размер swap-файла в МБ"
+MSG_FREE_SPACE="размер свободного места на диске"
+MSG_SWAP_SIZE_KB="размер swap"
+MSG_ERROR_FREE_SPACE="Ошибка: переменная free_space не определена"
+MSG_ERROR_NOT_ENOUGH_SPACE="Ошибка: на диске недостаточно свободного места для swap"
+MSG_ERROR_ONLY_DIGITS="Ошибка: переменная swap_size должна содержать только цифры"
+MSG_ERROR_CREATE_FAILED="Ошибка: не удалось создать swap-файл"
+MSG_ERROR_ENABLE_FAILED="Ошибка: не удалось включить swap-файл"
+MSG_SUCCESS_CREATED="Swap-файл создан успешно и включен в систему"
+MSG_EXISTING_SWAP="Найден существующий swap"
+MSG_PROMPT_EXISTING_ACTION="Что делать? (r) удалить и создать заново, (k) оставить и создать новый, (c) отмена"
+MSG_CANCELLED="Операция отменена"
+MSG_REMOVED="Существующий swap удалён"
+MSG_SWAP_DETAILS="Детали swap"

@@ -1,3 +1,233 @@
+#!/usr/bin/env bash
+# swap_mini.sh - small utility to create/remove/status swapfile
+
+b='\033[1m'
+l='\033[4m'
+y='\033[1;33m'
+g='\033[0;32m'
+r='\033[0;31m'
+e='\033[0m'
+
+set -u
+
+# Defaults
+DRY_RUN=0
+SWAP_PATH="/swapfile"
+SWAP_SIZE_ARG=""
+ACTION="create" # create|remove|status
+FORCE=0
+LANG="ru"
+
+usage(){
+  cat <<EOF
+Usage: sudo bash $0 [options]
+Options:
+  -n, --dry-run         Show actions without changing system
+  --action create|remove|status   Action to perform (default: create)
+  --size <MB>           Swap size in MB (for create)
+  --path <path>         Path to swap file (default: /swapfile)
+  -f, --force           Force destructive actions (remove without prompt)
+  --lang ru|en          Language for messages (ru default)
+EOF
+}
+
+# Parse args
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -n|--dry-run) DRY_RUN=1; shift ;;
+    --size) SWAP_SIZE_ARG="$2"; shift 2 ;;
+    --path) SWAP_PATH="$2"; shift 2 ;;
+    --action) ACTION="$2"; shift 2 ;;
+    -f|--force) FORCE=1; shift ;;
+    --lang) LANG="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown arg: $1"; usage; exit 1 ;;
+  esac
+done
+
+# load i18n
+I18N_FILE="$(dirname "$0")/i18n/${LANG}.sh"
+if [ -f "${I18N_FILE}" ]; then
+  # shellcheck source=/dev/null
+  . "${I18N_FILE}"
+else
+  . "$(dirname "$0")/i18n/ru.sh"
+fi
+
+run_cmd() {
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    echo -e "${y}[DRY-RUN] $*${e}"
+    return 0
+  else
+    eval "$@"
+    return $?
+  fi
+}
+
+ensure_root() {
+  if [[ $EUID -ne 0 ]]; then
+    echo -e "${r}${MSG_ROOT_REQUIRED} ${l}root${e}. ${MSG_PLEASE_SUDO:-Запустите через: sudo bash $0}" 
+    exit 1
+  fi
+}
+
+detect_existing_swap() {
+  EXISTING_SWAPS=()
+  if [ -r /proc/swaps ]; then
+    while read -r name type size used priority; do
+      if [ "$name" != "Filename" ] && [ -n "$name" ]; then
+        EXISTING_SWAPS+=("${name}:${size}")
+      fi
+    done < /proc/swaps
+  else
+    # fallback to swapon -s parsing
+    while read -r line; do
+      # skip header
+      [ -z "$line" ] && continue
+      if [[ "$line" == Filename* ]]; then
+        continue
+      fi
+      name=$(echo "$line" | awk '{print $1}')
+      size_kb=$(echo "$line" | awk '{print $3}')
+      [ -n "$name" ] && EXISTING_SWAPS+=("${name}:${size_kb}")
+    done < <(swapon -s 2>/dev/null)
+  fi
+
+  if [ ${#EXISTING_SWAPS[@]} -gt 0 ]; then
+    echo -e "${MSG_EXISTING_SWAP}:"
+    for s in "${EXISTING_SWAPS[@]}"; do
+      path=${s%%:*}
+      size_kb=${s##*:}
+      size_mb=$((size_kb/1024))
+      echo -e " - ${path} (${size_mb} MB)"
+    done
+    return 0
+  fi
+  return 1
+}
+
+remove_existing_swaps() {
+  for s in "${EXISTING_SWAPS[@]}"; do
+    path=${s%%:*}
+    echo -e "Removing swap: ${path}"
+    run_cmd "swapoff ${path}"
+    if [ "${DRY_RUN}" -eq 1 ]; then
+      echo -e "${y}[DRY-RUN] sed -i '/${path//\//\\/}/d' /etc/fstab${e}"
+    else
+      sed -i.bak "/${path//\//\\/}/d" /etc/fstab || true
+    fi
+    if [ -f "${path}" ] && [ "${DRY_RUN}" -ne 1 ]; then
+      rm -f "${path}" || true
+    fi
+  done
+  echo -e "${MSG_REMOVED}"
+}
+
+perform_create() {
+  detect_existing_swap
+  if [ $? -eq 0 ]; then
+    echo -e "${MSG_PROMPT_EXISTING_ACTION}"
+    read -p "[r/k/c]: " choice
+    case "$choice" in
+      r|R)
+        remove_existing_swaps
+        ;;
+      k|K)
+        echo "Keeping existing swaps and creating additional one"
+        ;;
+      *)
+        echo -e "${MSG_CANCELLED}"
+        exit 0
+        ;;
+    esac
+  fi
+
+  # size
+  if [ -n "${SWAP_SIZE_ARG}" ]; then
+    swap_size_mb="${SWAP_SIZE_ARG}"
+  else
+    read -p "${MSG_ENTER_SIZE} " swap_size_mb
+  fi
+  if [[ ! ${swap_size_mb} =~ ^[0-9]+$ ]]; then
+    echo -e "${r}${l}${MSG_ERROR_ONLY_DIGITS}${e}"
+    exit 1
+  fi
+
+  # check free space (in MB): df -BM gives available in blocks with M suffix; use previous method
+  free_space_mb=$(df -BM --output=avail / | sed '1d;s/[^0-9]*//g')
+  if [ -n "$free_space_mb" ] && [ $free_space_mb -lt $((swap_size_mb)) ]; then
+    echo -e "${r}${l}${MSG_ERROR_NOT_ENOUGH_SPACE}${e}"
+    exit 1
+  fi
+
+  run_cmd "dd if=/dev/zero of=${SWAP_PATH} bs=1M count=${swap_size_mb}"
+  if [ ! -f "${SWAP_PATH}" ] && [ "${DRY_RUN}" -ne 1 ]; then
+    echo -e "${r}${l}${MSG_ERROR_CREATE_FAILED}${e}"
+    exit 1
+  fi
+  run_cmd "chmod 600 ${SWAP_PATH}"
+  run_cmd "mkswap ${SWAP_PATH}"
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    echo -e "${y}[DRY-RUN] echo '${SWAP_PATH} none swap sw 0 0' >> /etc/fstab${e}"
+  else
+    cp /etc/fstab /etc/fstab.bak || true
+    grep -qF "${SWAP_PATH} none swap sw 0 0" /etc/fstab || echo "${SWAP_PATH} none swap sw 0 0" >> /etc/fstab
+  fi
+  run_cmd "swapon ${SWAP_PATH}"
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    echo -e "${y}[DRY-RUN] Проверка: swapon -s | grep ${SWAP_PATH}${e}"
+  else
+    if [ -z "$(swapon -s | grep ${SWAP_PATH})" ]; then
+      echo -e "${r}${l}${MSG_ERROR_ENABLE_FAILED}${e}"
+      exit 1
+    fi
+  fi
+  echo -e "${g}${MSG_SUCCESS_CREATED}${e}"
+}
+
+perform_remove() {
+  detect_existing_swap || true
+  if [ ${#EXISTING_SWAPS[@]} -gt 0 ]; then
+    echo -e "${MSG_SWAP_DETAILS}:"
+    for s in "${EXISTING_SWAPS[@]}"; do
+      path=${s%%:*}
+      echo " - ${path}"
+    done
+  fi
+
+  if [ "${FORCE}" -ne 1 ]; then
+    read -p "Confirm removal of ${SWAP_PATH}? [y/N] " yn
+    case "$yn" in
+      [Yy]*) ;;
+      *) echo "${MSG_CANCELLED}"; exit 0;;
+    esac
+  fi
+
+  run_cmd "swapoff ${SWAP_PATH}"
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    echo -e "${y}[DRY-RUN] sed -i '/${SWAP_PATH//\//\\/}/d' /etc/fstab${e}"
+  else
+    sed -i.bak "/${SWAP_PATH//\//\\/}/d" /etc/fstab || true
+  fi
+  if [ -f "${SWAP_PATH}" ] && [ "${DRY_RUN}" -ne 1 ]; then
+    rm -f "${SWAP_PATH}" || true
+  fi
+  echo -e "${MSG_REMOVED}"
+}
+
+perform_status() {
+  echo -e "${MSG_SWAP_DETAILS}:"
+  swapon -s
+}
+
+# main
+ensure_root
+case "${ACTION}" in
+  create) perform_create ;;
+  remove) perform_remove ;;
+  status) perform_status ;;
+  *) echo "Unknown action: ${ACTION}"; usage; exit 1 ;;
+esac
 #!/bin/bash
 b='\033[1m'
 l='\033[4m'
@@ -5,10 +235,47 @@ y='\033[1;33m'
 g='\033[0;32m'
 r='\033[0;31m'
 e='\033[0m'
-# Проверяем, что скрипт запущен от имени root
+
+# Парсинг параметров: поддерживаем -n | --dry-run
+DRY_RUN=0
+while [[ $# -gt 0 ]]; do
+   case "$1" in
+      -n|--dry-run)
+         DRY_RUN=1
+         shift
+         ;;
+      *)
+         break
+# Парсинг параметров: поддерживаем -n|--dry-run, --size, --path, --action, --force, --lang
+   esac
+done
+
+# Утилита-обёртка для выполнения команд — в dry-run печатает, иначе выполняет
+run_cmd() {
+   if [ "${DRY_RUN}" -eq 1 ]; then
+      echo -e "${y}[DRY-RUN] $*${e}"
+      return 0
+   else
+      eval "$@"
+      return $?
+   fi
+
+# load i18n
+I18N_FILE="$(dirname "$0")/i18n/${LANG}.sh"
+if [ -f "${I18N_FILE}" ]; then
+   # shellcheck source=/dev/null
+   . "${I18N_FILE}"
+else
+   # fallback to ru
+   . "$(dirname "$0")/i18n/ru.sh"
+fi
+
+}
+
+# Проверяем, что скрипт запущен от имени root (требование сохраняем)
 if [[ $EUID -ne 0 ]]; then
-   echo -e "${r}Этот скрипт должен быть запущен от имени ${l}root${e}${e}" 
-   exit 1
+    echo -e "${r}Этот скрипт должен быть запущен от имени ${l}root${e}. Запустите через: ${b}sudo bash $0${e}" 
+    exit 1
 fi
 
 # Определяем размер свободного места на диске в переменную free_space
@@ -24,22 +291,102 @@ if [ -z "$free_space" ]; then
 fi
 
 # Проверяем, что есть достаточно свободного места на диске и swap
+# Проверяем, что есть достаточно свободного места на диске и swap
 if [ $free_space -lt $((swap_size/1024)) ]; then
-  echo -e "${r}${l}Ошибка${e}: на диске недостаточно свободного места для swap${e}"
-  exit 1
+   echo -e "${r}${l}Ошибка${e}: на диске недостаточно свободного места для swap${e}"
+   exit 1
 fi
-swapoff -a
+# Выключаем текущий swap (в dry-run напечатаем команду)
+run_cmd "swapoff -a"
+# Запрашиваем у пользователя размер swap-файла в МБ и вносим в переменную swap_size
 # Запрашиваем у пользователя размер swap-файла в МБ и вносим в переменную swap_size
 read -p "Введите размер swap-файла в МБ " swap_size
 
 # Проверяем, что переменная swap_size содержит только цифры
+
+# simple action dispatcher
+perform_create() {
+   # determine requested size: priority CLI arg > interactive
+   if [ -n "${SWAP_SIZE_ARG}" ]; then
+      swap_size_mb="${SWAP_SIZE_ARG}"
+   else
+      read -p "${MSG_ENTER_SIZE} " swap_size_mb
+   fi
+   if [[ ! ${swap_size_mb} =~ ^[0-9]+$ ]]; then
+      echo -e "${r}${l}${MSG_ERROR_ONLY_DIGITS}${e}"
+      exit 1
+   fi
+   # check free space
+   if [ ${free_space} -lt $((swap_size_mb)) ]; then
+      echo -e "${r}${l}${MSG_ERROR_NOT_ENOUGH_SPACE}${e}"
+      exit 1
+   fi
+
+   run_cmd "dd if=/dev/zero of=${SWAP_PATH} bs=1M count=${swap_size_mb}"
+   if [ ! -f "${SWAP_PATH}" ] && [ "${DRY_RUN}" -ne 1 ]; then
+      echo -e "${r}${l}${MSG_ERROR_CREATE_FAILED}${e}"
+      exit 1
+   fi
+   run_cmd "chmod 600 ${SWAP_PATH}"
+   run_cmd "mkswap ${SWAP_PATH}"
+   if [ "${DRY_RUN}" -eq 1 ]; then
+      echo -e "${y}[DRY-RUN] echo '${SWAP_PATH} none swap sw 0 0' >> /etc/fstab${e}"
+   else
+      cp /etc/fstab /etc/fstab.bak
+      grep -qF "${SWAP_PATH} none swap sw 0 0" /etc/fstab || echo "${SWAP_PATH} none swap sw 0 0" >> /etc/fstab
+   fi
+   run_cmd "swapon ${SWAP_PATH}"
+   if [ "${DRY_RUN}" -eq 1 ]; then
+      echo -e "${y}[DRY-RUN] Проверка: swapon -s | grep ${SWAP_PATH}${e}"
+   else
+      if [ -z "$(swapon -s | grep ${SWAP_PATH})" ]; then
+         echo -e "${r}${l}${MSG_ERROR_ENABLE_FAILED}${e}"
+         exit 1
+      fi
+   fi
+   echo -e "${g}${MSG_SUCCESS_CREATED}${e}"
+}
+
+perform_remove() {
+   if [ "${FORCE}" -ne 1 ]; then
+      read -p "Confirm removal of ${SWAP_PATH}? [y/N] " yn
+      case "$yn" in
+         [Yy]*) ;;
+         *) echo "Aborted"; exit 0;;
+      esac
+   fi
+   run_cmd "swapoff ${SWAP_PATH}"
+   if [ "${DRY_RUN}" -eq 1 ]; then
+      echo -e "${y}[DRY-RUN] sed -i '/${SWAP_PATH//\//\\/}/d' /etc/fstab${e}"
+   else
+      sed -i.bak "/${SWAP_PATH//\//\\/}/d" /etc/fstab && echo "/etc/fstab backed up to /etc/fstab.bak"
+   fi
+   if [ -f "${SWAP_PATH}" ] && [ "${DRY_RUN}" -ne 1 ]; then
+      rm -f "${SWAP_PATH}"
+   fi
+   echo "Removed ${SWAP_PATH}"
+}
+
+perform_status() {
+   echo -e "Current swap entries:"
+   swapon -s
+}
+
+case "${ACTION}" in
+   create) perform_create ;;
+   remove) perform_remove ;;
+   status) perform_status ;;
+   *) echo "Unknown action: ${ACTION}"; exit 1 ;;
+esac
+
 if [[ ! $swap_size =~ ^[0-9]+$ ]]; then
    echo -e "${r}${l}Ошибка${e}: переменная swap_size должна содержать ${l}только цифры${e}${e}"
    exit 1
 fi
 
-# Создаем swap-файл
-dd if=/dev/zero of=/swapfile bs=1M count=$swap_size
+
+# Создаем swap-файл (через run_cmd — в dry-run будет только напечатано)
+run_cmd "dd if=/dev/zero of=/swapfile bs=1M count=$swap_size"
 
 # Проверяем, что swap-файл создан успешно
 if [ ! -f "/swapfile" ]; then
@@ -47,19 +394,30 @@ if [ ! -f "/swapfile" ]; then
    exit 1
 fi
 
-# Устанавливаем права доступа к swap-файлу
-chmod 600 /swapfile && mkswap /swapfile
 
-# Добавляем запись в fstab
-echo '/swapfile none swap sw 0 0' >> /etc/fstab
+# Устанавливаем права доступа и монтируем swap (через run_cmd чтобы dry-run был безопасен)
+run_cmd "chmod 600 /swapfile"
+run_cmd "mkswap /swapfile"
+
+# Добавляем запись в fstab безопасно: проверяем дубликат и делаем бэкап в реальном режиме
+if [ "${DRY_RUN}" -eq 1 ]; then
+   echo -e "${y}[DRY-RUN] echo '/swapfile none swap sw 0 0' >> /etc/fstab${e}"
+else
+   cp /etc/fstab /etc/fstab.bak
+   grep -qF '/swapfile none swap sw 0 0' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
 
 # Включаем swap-файл
-swapon /swapfile
+run_cmd "swapon /swapfile"
 
-# Проверяем, что swap-файл включен успешно
-if [ -z "$(swapon -s | grep /swapfile)" ]; then
-   echo -e "${R}${l}Ошибка${e}: не удалось включить swap-файл${e}"
-   exit 1
+# Проверяем, что swap-файл включен успешно (в dry-run - просто выводим ожидаемый результат)
+if [ "${DRY_RUN}" -eq 1 ]; then
+   echo -e "${y}[DRY-RUN] Проверка: swapon -s | grep /swapfile${e}"
+else
+   if [ -z "$(swapon -s | grep /swapfile)" ]; then
+      echo -e "${r}${l}Ошибка${e}: не удалось включить swap-файл${e}"
+      exit 1
+   fi
 fi
 
 # Выводим сообщение об успешном завершении операции с подробностями

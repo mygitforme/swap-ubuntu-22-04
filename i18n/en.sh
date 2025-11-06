@@ -1,0 +1,17 @@
+#!/bin/bash
+# English strings for swap_mini.sh
+MSG_ROOT_REQUIRED="This script must be run as"
+MSG_ENTER_SIZE="Enter swap-file size in MB"
+MSG_FREE_SPACE="free disk space"
+MSG_SWAP_SIZE_KB="swap size"
+MSG_ERROR_FREE_SPACE="Error: free_space variable is not defined"
+MSG_ERROR_NOT_ENOUGH_SPACE="Error: not enough free disk space for swap"
+MSG_ERROR_ONLY_DIGITS="Error: swap_size must contain digits only"
+MSG_ERROR_CREATE_FAILED="Error: failed to create swap-file"
+MSG_ERROR_ENABLE_FAILED="Error: failed to enable swap-file"
+MSG_SUCCESS_CREATED="Swap-file created and enabled successfully"
+MSG_EXISTING_SWAP="Existing swap detected"
+MSG_PROMPT_EXISTING_ACTION="What to do? (r) remove and recreate, (k) keep and create new, (c) cancel"
+MSG_CANCELLED="Operation cancelled"
+MSG_REMOVED="Existing swap removed"
+MSG_SWAP_DETAILS="Swap details"
