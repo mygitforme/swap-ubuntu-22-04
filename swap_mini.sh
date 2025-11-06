@@ -120,29 +120,34 @@ run_cmd() {
   fi
 }
 
-# If user requested suggestion only, compute RAM and print recommendation (allow non-root)
-if [ "$SUGGEST_SIZE" -eq 1 ]; then
+# Suggest size helper: reads /proc/meminfo and prints a recommendation
+suggest_size() {
   if [ -r /proc/meminfo ]; then
     ram_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
-    if [[ "$ram_kb" =~ ^[0-9]+$ ]]; then
-      ram_mb=$((ram_kb/1024))
-      if [ $ram_mb -le 2048 ]; then
-        suggested_mb=$ram_mb
-        note="RAM ≤ 2 GB — рекомендуем swap ≈ объёму RAM"
-      else
-        suggested_mb=2048
-        note="RAM > 2 GB — рекомендуем 1–2 GB; по умолчанию предлагается 2 GB"
-      fi
-      echo -e "Рекомендованный размер swap: ${suggested_mb} MB\nПримечание: ${note} (RAM=${ram_mb} MB)"
-      exit 0
-    else
-      echo "Не удалось прочитать MemTotal из /proc/meminfo" >&2
-      exit 1
-    fi
   else
-    echo "/proc/meminfo не доступен" >&2
-    exit 1
+    echo "Cannot read /proc/meminfo to detect RAM" >&2
+    return 1
   fi
+  if [[ ! "$ram_kb" =~ ^[0-9]+$ ]]; then
+    echo "Unexpected MemTotal value: $ram_kb" >&2
+    return 1
+  fi
+  ram_mb=$((ram_kb/1024))
+  if [ $ram_mb -le 2048 ]; then
+    suggested_mb=$ram_mb
+    note="RAM ≤ 2 GB — рекомендуем swap ≈ объёму RAM"
+  else
+    suggested_mb=2048
+    note="RAM > 2 GB — рекомендуем 1–2 GB; по умолчанию предлагается 2 GB"
+  fi
+  echo -e "Рекомендованный размер swap: ${suggested_mb} MB\nПримечание: ${note} (RAM=${ram_mb} MB)"
+  return 0
+}
+
+# If user requested suggestion-only, call helper and exit (this can run without root)
+if [ "$SUGGEST_SIZE" -eq 1 ]; then
+  suggest_size
+  exit 0
 fi
 
 ensure_root() {
@@ -425,229 +430,3 @@ case "${ACTION}" in
   *) echo "Unknown action: ${ACTION}"; usage; exit 1 ;;
 esac
 
-suggest_size() {
-  # read RAM in kB from /proc/meminfo
-  if [ -r /proc/meminfo ]; then
-    ram_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
-  else
-    echo "Cannot read /proc/meminfo to detect RAM" >&2
-    return 1
-  fi
-  if [[ ! "$ram_kb" =~ ^[0-9]+$ ]]; then
-    echo "Unexpected MemTotal value: $ram_kb" >&2
-    return 1
-  fi
-  ram_mb=$((ram_kb/1024))
-  if [ $ram_mb -le 2048 ]; then
-    suggested_mb=$ram_mb
-    note="RAM ≤ 2 GB — рекомендуем swap ≈ объёму RAM"
-  else
-    suggested_mb=2048
-    note="RAM > 2 GB — рекомендуем 1–2 GB; по умолчанию предлагается 2 GB"
-  fi
-  echo -e "Рекомендованный размер swap: ${suggested_mb} MB\nПримечание: ${note} (RAM=${ram_mb} MB)"
-  return 0
-}
-
-# If user requested suggestion only, print and exit
-if [ "$SUGGEST_SIZE" -eq 1 ]; then
-  suggest_size
-  exit 0
-fi
-  *) echo "Unknown action: ${ACTION}"; usage; exit 1 ;;
-esac
-
-#!/bin/bash
-b='\033[1m'
-l='\033[4m'
-y='\033[1;33m'
-g='\033[0;32m'
-r='\033[0;31m'
-e='\033[0m'
-
-# Парсинг параметров: поддерживаем -n | --dry-run
-DRY_RUN=0
-while [[ $# -gt 0 ]]; do
-   case "$1" in
-      -n|--dry-run)
-         DRY_RUN=1
-         shift
-         ;;
-      *)
-         break
-# Парсинг параметров: поддерживаем -n|--dry-run, --size, --path, --action, --force, --lang
-   esac
-done
-
-# Утилита-обёртка для выполнения команд — в dry-run печатает, иначе выполняет
-run_cmd() {
-   if [ "${DRY_RUN}" -eq 1 ]; then
-      echo -e "${y}[DRY-RUN] $*${e}"
-      return 0
-   else
-      eval "$@"
-      return $?
-   fi
-
-# load i18n
-I18N_FILE="$(dirname "$0")/i18n/${LANG}.sh"
-if [ -f "${I18N_FILE}" ]; then
-   # shellcheck source=/dev/null
-   . "${I18N_FILE}"
-else
-   # fallback to ru
-   . "$(dirname "$0")/i18n/ru.sh"
-fi
-
-}
-
-# Проверяем, что скрипт запущен от имени root (требование сохраняем)
-if [[ $EUID -ne 0 ]]; then
-    echo -e "${r}Этот скрипт должен быть запущен от имени ${l}root${e}. Запустите через: ${b}sudo bash $0${e}" 
-    exit 1
-fi
-
-# Определяем размер свободного места на диске в переменную free_space
-free_space=$(df -BG --output=avail / | sed '1d;s/[^0-9.]*//g')
-swap_size=$(grep SwapTotal /proc/meminfo | awk '{print $2}')
-echo -e "размер свободного места на диске ${g}$free_space${e}"
-echo -e "размер swap: ${g}$swap_size kB${e}"
-
-# Проверяем, что переменная free_space определена
-if [ -z "$free_space" ]; then
-  echo -e "${r}${l}Ошибка${e}: переменная ${b}free_space${e} не определена${e}"
-  exit 1
-fi
-
-# Проверяем, что есть достаточно свободного места на диске и swap
-# Проверяем, что есть достаточно свободного места на диске и swap
-if [ $free_space -lt $((swap_size/1024)) ]; then
-   echo -e "${r}${l}Ошибка${e}: на диске недостаточно свободного места для swap${e}"
-   exit 1
-fi
-# Выключаем текущий swap (в dry-run напечатаем команду)
-run_cmd "swapoff -a"
-# Запрашиваем у пользователя размер swap-файла в МБ и вносим в переменную swap_size
-# Запрашиваем у пользователя размер swap-файла в МБ и вносим в переменную swap_size
-read -p "Введите размер swap-файла в МБ " swap_size
-
-# Проверяем, что переменная swap_size содержит только цифры
-
-# simple action dispatcher
-perform_create() {
-   # determine requested size: priority CLI arg > interactive
-   if [ -n "${SWAP_SIZE_ARG}" ]; then
-      swap_size_mb="${SWAP_SIZE_ARG}"
-   else
-      read -p "${MSG_ENTER_SIZE} " swap_size_mb
-   fi
-   if [[ ! ${swap_size_mb} =~ ^[0-9]+$ ]]; then
-      echo -e "${r}${l}${MSG_ERROR_ONLY_DIGITS}${e}"
-      exit 1
-   fi
-   # check free space
-   if [ ${free_space} -lt $((swap_size_mb)) ]; then
-      echo -e "${r}${l}${MSG_ERROR_NOT_ENOUGH_SPACE}${e}"
-      exit 1
-   fi
-
-   run_cmd "dd if=/dev/zero of=${SWAP_PATH} bs=1M count=${swap_size_mb}"
-   if [ ! -f "${SWAP_PATH}" ] && [ "${DRY_RUN}" -ne 1 ]; then
-      echo -e "${r}${l}${MSG_ERROR_CREATE_FAILED}${e}"
-      exit 1
-   fi
-   run_cmd "chmod 600 ${SWAP_PATH}"
-   run_cmd "mkswap ${SWAP_PATH}"
-   if [ "${DRY_RUN}" -eq 1 ]; then
-      echo -e "${y}[DRY-RUN] echo '${SWAP_PATH} none swap sw 0 0' >> /etc/fstab${e}"
-   else
-      cp /etc/fstab /etc/fstab.bak
-      grep -qF "${SWAP_PATH} none swap sw 0 0" /etc/fstab || echo "${SWAP_PATH} none swap sw 0 0" >> /etc/fstab
-   fi
-   run_cmd "swapon ${SWAP_PATH}"
-   if [ "${DRY_RUN}" -eq 1 ]; then
-      echo -e "${y}[DRY-RUN] Проверка: swapon -s | grep ${SWAP_PATH}${e}"
-   else
-      if [ -z "$(swapon -s | grep ${SWAP_PATH})" ]; then
-         echo -e "${r}${l}${MSG_ERROR_ENABLE_FAILED}${e}"
-         exit 1
-      fi
-   fi
-   echo -e "${g}${MSG_SUCCESS_CREATED}${e}"
-}
-
-perform_remove() {
-   if [ "${FORCE}" -ne 1 ]; then
-      read -p "Confirm removal of ${SWAP_PATH}? [y/N] " yn
-      case "$yn" in
-         [Yy]*) ;;
-         *) echo "Aborted"; exit 0;;
-      esac
-   fi
-   run_cmd "swapoff ${SWAP_PATH}"
-   if [ "${DRY_RUN}" -eq 1 ]; then
-      echo -e "${y}[DRY-RUN] sed -i '/${SWAP_PATH//\//\\/}/d' /etc/fstab${e}"
-   else
-      sed -i.bak "/${SWAP_PATH//\//\\/}/d" /etc/fstab && echo "/etc/fstab backed up to /etc/fstab.bak"
-   fi
-   if [ -f "${SWAP_PATH}" ] && [ "${DRY_RUN}" -ne 1 ]; then
-      rm -f "${SWAP_PATH}"
-   fi
-   echo "Removed ${SWAP_PATH}"
-}
-
-perform_status() {
-   echo -e "Current swap entries:"
-   swapon -s
-}
-
-case "${ACTION}" in
-   create) perform_create ;;
-   remove) perform_remove ;;
-   status) perform_status ;;
-   *) echo "Unknown action: ${ACTION}"; exit 1 ;;
-esac
-
-if [[ ! $swap_size =~ ^[0-9]+$ ]]; then
-   echo -e "${r}${l}Ошибка${e}: переменная swap_size должна содержать ${l}только цифры${e}${e}"
-   exit 1
-fi
-
-
-# Создаем swap-файл (через run_cmd — в dry-run будет только напечатано)
-run_cmd "dd if=/dev/zero of=/swapfile bs=1M count=$swap_size"
-
-# Проверяем, что swap-файл создан успешно
-if [ ! -f "/swapfile" ]; then
-   echo -e "${r}${l}Ошибка${e}: не удалось создать swap-файл${e}"
-   exit 1
-fi
-
-
-# Устанавливаем права доступа и монтируем swap (через run_cmd чтобы dry-run был безопасен)
-run_cmd "chmod 600 /swapfile"
-run_cmd "mkswap /swapfile"
-
-# Добавляем запись в fstab безопасно: проверяем дубликат и делаем бэкап в реальном режиме
-if [ "${DRY_RUN}" -eq 1 ]; then
-   echo -e "${y}[DRY-RUN] echo '/swapfile none swap sw 0 0' >> /etc/fstab${e}"
-else
-   cp /etc/fstab /etc/fstab.bak
-   grep -qF '/swapfile none swap sw 0 0' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
-fi
-
-# Включаем swap-файл
-run_cmd "swapon /swapfile"
-
-# Проверяем, что swap-файл включен успешно (в dry-run - просто выводим ожидаемый результат)
-if [ "${DRY_RUN}" -eq 1 ]; then
-   echo -e "${y}[DRY-RUN] Проверка: swapon -s | grep /swapfile${e}"
-else
-   if [ -z "$(swapon -s | grep /swapfile)" ]; then
-      echo -e "${r}${l}Ошибка${e}: не удалось включить swap-файл${e}"
-      exit 1
-   fi
-fi
-
-# Выводим сообщение об успешном завершении операции с подробностями
-echo -e "${g}Swap-файл размером ${b}$swap_size МБ${e} создан успешно и включен в систему. Для проверки можно выполнить команду '${b}swapon -s${e}'.${e}"
