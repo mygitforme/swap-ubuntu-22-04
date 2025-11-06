@@ -21,6 +21,14 @@ LANG_SET=0
 SYSTEMD=0
 SUGGEST_SIZE=0
 MIN_SWAP_MB=128
+SCRIPT_DIR=$(dirname "$0")
+LOG_FILE="${SCRIPT_DIR}/swap_mini.log"
+
+log() {
+  # simple logger: timestamp + message
+  ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  echo "${ts} - $*" >> "${LOG_FILE}" 2>/dev/null || true
+}
 
 usage(){
   cat <<EOF
@@ -252,11 +260,47 @@ perform_create() {
     esac
   fi
 
-  # size
+  # size: if user didn't pass --size, compute suggestion and ask
   if [ -n "${SWAP_SIZE_ARG}" ]; then
     swap_size_mb="${SWAP_SIZE_ARG}"
   else
-    read -p "${MSG_ENTER_SIZE} " swap_size_mb
+    # compute suggested and range
+    if suggest_size >/dev/null 2>&1; then
+      # capture values again (reuse logic)
+      ram_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+      ram_mb=$((ram_kb/1024))
+      if [ ${ram_mb} -le 2048 ]; then
+        suggested_mb=${ram_mb}
+        range_min=${ram_mb}
+        range_max=$(( ram_mb * 2 ))
+        [ ${range_max} -gt 2048 ] && range_max=2048
+      else
+        suggested_mb=2048
+        range_min=1024
+        range_max=2048
+      fi
+      echo -e "Рекомендованный размер swap: ${suggested_mb} MB"
+      echo -e "Рекомендуемый диапазон: ${range_min} MB — ${range_max} MB"
+      log "Suggested swap ${suggested_mb}MB (range ${range_min}-${range_max} MB), RAM=${ram_mb}MB"
+      # ask user
+      if [ -t 0 ]; then
+        read -p "Создать swap ${suggested_mb} MB? [Y/n] " ans
+        case "${ans}" in
+          [Nn]*)
+            read -p "Введите желаемый размер в MB: " swap_size_mb
+            ;;
+          *)
+            swap_size_mb=${suggested_mb}
+            ;;
+        esac
+      else
+        # non-interactive default to suggested
+        swap_size_mb=${suggested_mb}
+      fi
+    else
+      # fallback interactive prompt
+      read -p "${MSG_ENTER_SIZE} " swap_size_mb
+    fi
   fi
   if [[ ! ${swap_size_mb} =~ ^[0-9]+$ ]]; then
     echo -e "${r}${l}${MSG_ERROR_ONLY_DIGITS}${e}"
@@ -295,8 +339,10 @@ perform_create() {
   fi
 
   run_cmd "dd if=/dev/zero of=${SWAP_PATH} bs=1M count=${swap_size_mb}"
+  log "Running dd to create ${SWAP_PATH} count=${swap_size_mb}MB (dry=${DRY_RUN})"
   if [ ! -f "${SWAP_PATH}" ] && [ "${DRY_RUN}" -ne 1 ]; then
     echo -e "${r}${l}${MSG_ERROR_CREATE_FAILED}${e}"
+    log "Error: swapfile ${SWAP_PATH} not found after dd"
     exit 1
   fi
   run_cmd "chmod 600 ${SWAP_PATH}"
@@ -312,15 +358,18 @@ perform_create() {
     fi
   fi
   run_cmd "swapon ${SWAP_PATH}"
+  log "swapon ${SWAP_PATH} requested (dry=${DRY_RUN})"
   if [ "${DRY_RUN}" -eq 1 ]; then
     echo -e "${y}[DRY-RUN] Проверка: swapon -s | grep ${SWAP_PATH}${e}"
   else
     if [ -z "$(swapon -s | grep ${SWAP_PATH})" ]; then
       echo -e "${r}${l}${MSG_ERROR_ENABLE_FAILED}${e}"
+      log "Error: swapon did not list ${SWAP_PATH}"
       exit 1
     fi
   fi
   echo -e "${g}${MSG_SUCCESS_CREATED}${e}"
+  log "Success: swap ${SWAP_PATH} created ${swap_size_mb}MB"
 }
 
 perform_remove() {
