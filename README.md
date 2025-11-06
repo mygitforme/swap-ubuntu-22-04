@@ -56,154 +56,112 @@ Parameters and options
 --action — one of create|remove|status (default: create).
 --size — size in MB (can be passed via an option or interactively when creating).
 --path — path to the swap file (default: /swapfile).
--f, --force — skip confirmation when removing.
---lang — message language (ru or en).
-Post-execution checks
+```markdown
+# swap-ubuntu-22-04 — быстрый SWAP-менеджер для серверного Linux
 
-Check that swap is enabled:
-```bash
-swapon -s
-```
-Make sure /etc/fstab contains an entry:
-```bash
-grep '/swapfile' /etc/fstab
-```
-Testing in multipass (recommended safe scenario)
+Небольшая утилита для быстрого создания, удаления и проверки swap-файла на серверных Linux-дистрибутивах. Изначально разработана для Ubuntu 22.04, но совместима с большинством современных дистрибутивов с coreutils/util-linux и (опционально) systemd.
 
-Create an Ubuntu 22.04 VM:
-```bash
-multipass launch --name swap-test ubuntu:22.04
-multipass shell swap-test
-```
-Copy the script inside the VM and run dry-run:
-```bash
-sudo bash swap_mini.sh --action create --size 128 --path /swapfile -n
-```
-If dry-run is successful, run the real run (in the VM):
-```bash
-sudo bash swap_mini.sh --action create --size 128 --path /swapfile
-swapon -s
-grep /swapfile /etc/fstab
-```
-Rollback and remove
+Кратко
+- Подход: безопасный однофайловый bash-скрипт, запускаемый от root (скрипт проверяет `$EUID`).
+- Цель: дать простой, проверяемый workflow для создания `/swapfile` или systemd `.swap` unit.
 
-Remove via script: sudo bash swap_mini.sh --action remove --path /swapfile.
-The script attempts to save /etc/fstab.bak before modifying it—check the backup if necessary.
-Localization
-
-Language files are located in i18n/. To add a new language, create a file i18n/<code>.sh with a set of variable messages (for example, ru.sh and en.sh).
-
-Author and License
-
-The script and repository are MIT-compatible; see the LICENSE file.
-
-Небольшая утилита для быстрого создания/удаления/проверки swap-файла на Linux-сервере. Изначально написана и протестирована для Ubuntu 22.04, но может работать и на других современных Linux-дистрибутивах (см. раздел "Поддерживаемые ОС").
-
-Основные возможности
-- создать swap-файл (с интерактивным запросом размера или с опцией `--size`)
-- удалить swap-файл (с подтверждением или с `--force`)
-- вывести статус swap (`--action status`)
-- безопасный dry-run (`-n` / `--dry-run`) — покажет, какие команды будут выполнены, не изменяя систему
-- базовая поддержка локализации: `--lang ru|en` (файлы в `i18n/`)
+Ключевые возможности
+- create/remove/status — основные действия (`--action create|remove|status`).
+- dry-run: `-n` / `--dry-run` — симулирует действия, не влияет на систему.
+- systemd: опция `--systemd` позволяет создать/включить `.swap` unit вместо записи в `/etc/fstab`.
+- i18n: поддержка языков через `i18n/*.sh` и автоматическое обнаружение/выбор языка (`--lang`, `SWAP_LANG`).
+- Suggest size: `--suggest-size` — подсказка рекомендованного размера swap по объёму RAM.
 
 Файлы в репозитории
-- `swap_mini.sh` — основной скрипт. Запуск под root (скрипт проверяет `$EUID` и просит запуск через `sudo`).
-- `i18n/ru.sh`, `i18n/en.sh` — простые языковые файлы для сообщений.
+- `swap_mini.sh` — основной скрипт (используйте `sudo bash swap_mini.sh ...`).
+- `i18n/ru.sh`, `i18n/en.sh` — примеры переводов сообщений.
+- `LICENSE`, `README.md` — лицензия и документация.
 
 Поддерживаемые ОС
-- Тестировано: Ubuntu 22.04 (рекомендуется)
-- Ожидаемо совместимо: Debian 11/12, современные CentOS/RHEL 8+, Rocky/AlmaLinux (при наличии утилит coreutils и util-linux)
-- Не поддерживается: macOS, FreeBSD (команды `mkswap`, `swapon`, `/proc/meminfo` — Linux-специфичны)
+- Рекомендуется: Ubuntu 22.04 (тестирование). Проект целится на серверные Linux-дистрибутивы: Debian, Ubuntu, CentOS/RHEL, Rocky/AlmaLinux и т.д.
+- Опция `--systemd` требует systemd на хосте.
+- Не поддерживается: macOS, BSD-подобные системы (утилиты `mkswap`, `swapon`, `/proc/meminfo` — Linux-специфичны).
 
-Требования (на стороне сервера)
+Требования
 - Bash
-- coreutils (df, grep, awk, sed)
-- util-linux (mkswap, swapon, swapoff)
-- права root для выполнения действий, меняющих систему
+- coreutils: `df`, `grep`, `awk`, `sed`
+- util-linux: `mkswap`, `swapon`, `swapoff`
+- права root для действий, изменяющих систему
 
-Опасности и предостережения
-- Скрипт редактирует `/etc/fstab`. В реальном режиме он создаёт резервную копию `/etc/fstab.bak` перед записью. Тем не менее тестируйте в изолированной VM (multipass/LXC/VM) перед продом.
-- `dd` записывает нули и может занять время и диск. Не запускайте в продакшн без проверки свободного места.
+Безопасность и предостережения
+- Скрипт модифицирует системное состояние и может править `/etc/fstab`. Всегда выполняйте `-n/--dry-run` сначала.
+- Скрипт делает резервную копию `/etc/fstab` перед записью (обычно `/etc/fstab.bak`).
+- `dd` выделяет место и пишет нули — проверьте свободное место и влияние на систему перед выполнением.
 
-Примеры использования
+Использование — примеры
 
-1) Dry-run: посмотреть, что будет сделано (рекомендуется перед реальным запуском)
-
+1) Dry-run (рекомендуется перед реальным запуском)
 ```bash
-sudo bash swap_mini.sh --action create --size 128 --path /swapfile --lang ru --dry-run
-sudo bash swap_mini.sh -n --action create --size 128
+sudo bash swap_mini.sh -n --action create --size 512 --path /swapfile --lang ru
+sudo bash swap_mini.sh --dry-run --action create --suggest-size
 ```
 
-2) Создать swap-файл 128 МБ (реально)
-
+2) Создать swap-файл 1 GB
 ```bash
-sudo bash swap_mini.sh --action create --size 128 --path /swapfile
+sudo bash swap_mini.sh --action create --size 1024 --path /swapfile
 ```
 
-3) Удалить swap-файл (с подтверждением). Для автоматического удаления используйте `--force`.
+3) Создать systemd `.swap` unit вместо /etc/fstab
+```bash
+sudo bash swap_mini.sh --action create --size 1024 --path /swapfile --systemd --unit-name my-swap
+```
 
+4) Удалить swap (с подтверждением) или автоматически
 ```bash
 sudo bash swap_mini.sh --action remove --path /swapfile
 sudo bash swap_mini.sh --action remove --path /swapfile --force
 ```
 
-4) Посмотреть статус swap
-
+5) Показать статус swap
 ```bash
 sudo bash swap_mini.sh --action status
 ```
 
-Параметры и опции
-- `-n`, `--dry-run` — не вносить изменений, только показать команды и проверки.
-- `--action` — одно из `create|remove|status` (по умолчанию `create`).
-- `--size` — размер в МБ (при `create` можно передать через опцию или в интерактивном режиме).
+Параметры и опции (основные)
+- `-n`, `--dry-run` — симулировать действия, не вносить изменений.
+- `--action` — `create|remove|status` (по умолчанию `create`).
+- `--size` — размер в МБ (при `create`).
 - `--path` — путь к swap-файлу (по умолчанию `/swapfile`).
 - `-f`, `--force` — при `remove` пропускать подтверждение.
-- `--lang` — язык сообщений (`ru` или `en`).
+- `--systemd` — использовать systemd unit вместо `/etc/fstab`.
+- `--unit-name` — имя для unit (если не задано, используется basename пути).
+- `--lang` или `SWAP_LANG` — язык сообщений; скрипт автоматически обнаруживает `i18n/*.sh`.
+- `--suggest-size` — вывести рекомендуемый размер swap по объёму RAM.
 
 Проверки после выполнения
-- Проверьте, что swap включён:
+- `swapon -s` — список активных swap-ресурсов.
+- `grep '/swapfile' /etc/fstab` — проверка записи (если не используется systemd).
 
-```bash
-swapon -s
-```
+Тестирование (рекомендованный безопасный сценарий)
 
-- Убедитесь, что `/etc/fstab` содержит запись:
+Тестируйте в изолированной виртуальной машине или контейнере (LXC, VirtualBox, cloud VM и т.п.). Общие шаги:
 
-```bash
-grep '/swapfile' /etc/fstab
-```
-
-Тестирование в multipass (рекомендуемый безопасный сценарий)
-
-1) Создайте VM Ubuntu 22.04:
-
-```bash
-multipass launch --name swap-test ubuntu:22.04
-multipass shell swap-test
-```
-
-2) Внутри VM скопируйте скрипт и выполните dry-run:
+1. Создайте изолированную среду и подключитесь к ней.
+2. Скопируйте `swap_mini.sh` в среду и выполните dry-run для проверки логики:
 
 ```bash
 sudo bash swap_mini.sh --action create --size 128 --path /swapfile -n
 ```
 
-3) Если dry-run в порядке — выполните реальный запуск (в VM):
+3. Если dry-run прошёл успешно — выполните реальный запуск и проверьте результаты:
 
 ```bash
 sudo bash swap_mini.sh --action create --size 128 --path /swapfile
 swapon -s
 grep /swapfile /etc/fstab
+# или при использовании systemd: systemctl status <unit-name>
 ```
 
-Откат и удаление
-- Удаление через скрипт: `sudo bash swap_mini.sh --action remove --path /swapfile`.
-- Скрипт пытается сохранить `/etc/fstab.bak` перед изменением — проверьте бэкап при необходимости.
-
 Локализация
-- Языковые файлы находятся в `i18n/`. Добавление нового языка — создать файл `i18n/<код>.sh` с набором переменных сообщений (пример `ru.sh` и `en.sh`).
-
+- Языковые файлы находятся в `i18n/`. Для добавления нового языка создайте `i18n/<code>.sh` с набором MSG_* переменных, аналогичных `ru.sh` и `en.sh`.
+- Скрипт поддерживает автоматическое обнаружение доступных языков и выбор через `--lang` или переменную окружения `SWAP_LANG`.
 
 Автор и лицензия
-- Скрипт и репозиторий — MIT-совместимый; см. файл `LICENSE`.
+- MIT-совместимая лицензия — смотрите файл `LICENSE`.
+
+```

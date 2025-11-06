@@ -19,6 +19,8 @@ FORCE=0
 LANG=""
 LANG_SET=0
 SYSTEMD=0
+SUGGEST_SIZE=0
+MIN_SWAP_MB=128
 
 usage(){
   cat <<EOF
@@ -31,6 +33,7 @@ Options:
   -f, --force           Force destructive actions (remove without prompt)
   --lang ru|en          Language for messages (ru default)
   --systemd             Use systemd .swap unit instead of /etc/fstab
+  --suggest-size        Print a recommended swap size based on RAM and exit
 EOF
 }
 
@@ -38,6 +41,7 @@ EOF
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -n|--dry-run) DRY_RUN=1; shift ;;
+    --suggest-size) SUGGEST_SIZE=1; shift ;;
     --size) SWAP_SIZE_ARG="$2"; shift 2 ;;
     --path) SWAP_PATH="$2"; shift 2 ;;
     --action) ACTION="$2"; shift 2 ;;
@@ -107,6 +111,31 @@ run_cmd() {
     return $?
   fi
 }
+
+# If user requested suggestion only, compute RAM and print recommendation (allow non-root)
+if [ "$SUGGEST_SIZE" -eq 1 ]; then
+  if [ -r /proc/meminfo ]; then
+    ram_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+    if [[ "$ram_kb" =~ ^[0-9]+$ ]]; then
+      ram_mb=$((ram_kb/1024))
+      if [ $ram_mb -le 2048 ]; then
+        suggested_mb=$ram_mb
+        note="RAM ≤ 2 GB — рекомендуем swap ≈ объёму RAM"
+      else
+        suggested_mb=2048
+        note="RAM > 2 GB — рекомендуем 1–2 GB; по умолчанию предлагается 2 GB"
+      fi
+      echo -e "Рекомендованный размер swap: ${suggested_mb} MB\nПримечание: ${note} (RAM=${ram_mb} MB)"
+      exit 0
+    else
+      echo "Не удалось прочитать MemTotal из /proc/meminfo" >&2
+      exit 1
+    fi
+  else
+    echo "/proc/meminfo не доступен" >&2
+    exit 1
+  fi
+fi
 
 ensure_root() {
   if [[ $EUID -ne 0 ]]; then
@@ -234,10 +263,35 @@ perform_create() {
     exit 1
   fi
 
+  # normalize (remove leading zeros)
+  swap_size_mb=$(echo "${swap_size_mb}" | sed 's/^0*//')
+  if [ -z "${swap_size_mb}" ]; then
+    echo -e "${r}${l}${MSG_ERROR_ONLY_DIGITS}${e}"
+    exit 1
+  fi
+
+  # minimal size check
+  if [ ${swap_size_mb} -lt ${MIN_SWAP_MB} ]; then
+    echo -e "${r}${l}Минимальный допустимый размер swap: ${MIN_SWAP_MB} MB${e}"
+    exit 1
+  fi
+
   free_space_mb=$(df -BM --output=avail / | sed '1d;s/[^0-9]*//g')
-  if [ -n "$free_space_mb" ] && [ $free_space_mb -lt $((swap_size_mb)) ]; then
+  if [ -n "${free_space_mb}" ] && [ ${free_space_mb} -lt ${swap_size_mb} ]; then
     echo -e "${r}${l}${MSG_ERROR_NOT_ENOUGH_SPACE}${e}"
     exit 1
+  fi
+
+  # warn if requested size is large relative to free disk (e.g. >50% of free space)
+  if [ -n "${free_space_mb}" ] && [ ${swap_size_mb} -gt $((free_space_mb/2)) ]; then
+    echo -e "${y}Внимание: запрошенный размер ${swap_size_mb} MB составляет >50% доступного места (${free_space_mb} MB).${e}"
+    if [ "${DRY_RUN}" -ne 1 ] && [ "${FORCE}" -ne 1 ]; then
+      read -p "Продолжить? [y/N] " ok
+      case "${ok}" in
+        [Yy]*) ;;
+        *) echo "Отменено"; exit 1 ;;
+      esac
+    fi
   fi
 
   run_cmd "dd if=/dev/zero of=${SWAP_PATH} bs=1M count=${swap_size_mb}"
@@ -319,6 +373,38 @@ case "${ACTION}" in
   create) perform_create ;;
   remove) perform_remove ;;
   status) perform_status ;;
+  *) echo "Unknown action: ${ACTION}"; usage; exit 1 ;;
+esac
+
+suggest_size() {
+  # read RAM in kB from /proc/meminfo
+  if [ -r /proc/meminfo ]; then
+    ram_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+  else
+    echo "Cannot read /proc/meminfo to detect RAM" >&2
+    return 1
+  fi
+  if [[ ! "$ram_kb" =~ ^[0-9]+$ ]]; then
+    echo "Unexpected MemTotal value: $ram_kb" >&2
+    return 1
+  fi
+  ram_mb=$((ram_kb/1024))
+  if [ $ram_mb -le 2048 ]; then
+    suggested_mb=$ram_mb
+    note="RAM ≤ 2 GB — рекомендуем swap ≈ объёму RAM"
+  else
+    suggested_mb=2048
+    note="RAM > 2 GB — рекомендуем 1–2 GB; по умолчанию предлагается 2 GB"
+  fi
+  echo -e "Рекомендованный размер swap: ${suggested_mb} MB\nПримечание: ${note} (RAM=${ram_mb} MB)"
+  return 0
+}
+
+# If user requested suggestion only, print and exit
+if [ "$SUGGEST_SIZE" -eq 1 ]; then
+  suggest_size
+  exit 0
+fi
   *) echo "Unknown action: ${ACTION}"; usage; exit 1 ;;
 esac
 
